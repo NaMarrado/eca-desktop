@@ -1,5 +1,19 @@
 # NaMarrado ECA development workflow
 
+## Mandatory engineering rules
+
+- No fallbacks.
+- No hardcoding.
+- Maximize granularity: split every concern that can be meaningfully separated.
+- Maximize scalability.
+- Maximize optimization without sacrificing functionality.
+- Design for the end state from the start; do not create provisional versions or staged substitutes.
+- No cheap fixes, workarounds, or bypasses.
+- Write professional code; use precise types instead of broad types such as `any`.
+- Resolve warnings, not only errors.
+- Filter false positives during bug investigations. Every change must be justified
+  by concrete evidence.
+
 This fork keeps two kinds of history separate:
 
 - `master` stays compatible with `upstream/master` and contains only changes
