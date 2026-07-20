@@ -2,45 +2,51 @@
 
 This fork keeps two kinds of history separate:
 
-- `master` mirrors the original project's `upstream/master`.
+- `master` stays compatible with `upstream/master` and contains only changes
+  deliberately selected for public or upstream use.
 - `nam-ver` is the long-lived NaMarrado build with private visual and functional customizations.
 
-## Keep `nam-ver` compatible with upstream
+## Bring upstream changes into the custom build
 
-Periodically merge the original project into the custom branch:
+Update `master` from the original project, then merge that clean integration
+branch into `nam-ver`:
 
 ```sh
-git switch nam-ver
+git switch master
 git fetch upstream
 git merge upstream/master
+git push origin master
+git switch nam-ver
+git merge master
 git push origin nam-ver
 ```
 
 Do not merge the whole `nam-ver` branch into `master`. Git `rerere` is enabled
 locally so resolutions of recurring merge conflicts can be reused.
 
-## Contribute only selected changes upstream
+## Promote only selected changes
 
-Keep each logical change in its own commit. For a change that should become a
-real upstream pull request, create a clean contribution branch from upstream and
-copy only the chosen commits:
+Keep each logical change in its own commit. Copy only a chosen commit from
+`nam-ver` into `master`:
 
 ```sh
+git switch master
 git fetch upstream
-git switch -c contrib/<change-name> upstream/master
+git merge upstream/master
 git cherry-pick -x <chosen-commit>
-git push -u origin contrib/<change-name>
+git push origin master
 ```
 
-Open the pull request from `contrib/<change-name>` to the original project's
-`master`. Custom visual or product-specific commits remain only in `nam-ver`.
+Custom visual or product-specific commits remain only in `nam-ver`. When
+separate changes need separate pull requests, create `contrib/<change-name>`
+from `upstream/master` and cherry-pick only the commits for that one PR.
 
 ## Refresh the fork's clean base branch
 
 ```sh
 git switch master
 git fetch upstream
-git merge --ff-only upstream/master
+git merge upstream/master
 git push origin master
 git switch nam-ver
 ```
