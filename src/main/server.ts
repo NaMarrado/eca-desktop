@@ -845,7 +845,15 @@ export class EcaServer {
             }
 
             this.onLog(`Starting ECA server: ${serverPath}`);
-            const child = spawn(serverPath, ['server'], {
+            const isWindowsScript = os.platform() === 'win32'
+                && /\.(?:bat|cmd)$/i.test(serverPath);
+            const executable = isWindowsScript
+                ? (process.env.ComSpec || 'cmd.exe')
+                : serverPath;
+            const args = isWindowsScript
+                ? ['/d', '/s', '/c', 'call', serverPath, 'server']
+                : ['server'];
+            const child = spawn(executable, args, {
                 stdio: ['pipe', 'pipe', 'pipe'],
                 env: { ...process.env, ...shellEnv },
             });
