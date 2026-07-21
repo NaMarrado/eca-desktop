@@ -304,6 +304,35 @@ async function sha256OfFile(filePath: string): Promise<string> {
     });
 }
 
+/**
+ * Terminate the server process. On Windows, `ChildProcess.kill()` maps to
+ * TerminateProcess on the direct child only, orphaning its subprocess tree
+ * (MCP stdio servers, tool children) — take the whole tree down with
+ * `taskkill /T` instead, falling back to a direct kill if taskkill can't
+ * start. On POSIX the signal is delivered as-is and this behaves exactly
+ * like `proc.kill(signal)`, including throwing, so callers keep their
+ * existing error handling.
+ */
+export function killServerProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
+    if (os.platform() === 'win32' && typeof proc.pid === 'number') {
+        let taskkill: ChildProcess;
+        try {
+            taskkill = spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {
+                stdio: 'ignore',
+                windowsHide: true,
+            });
+        } catch {
+            proc.kill(signal);
+            return;
+        }
+        taskkill.on('error', () => {
+            try { proc.kill(signal); } catch { /* noop */ }
+        });
+        return;
+    }
+    proc.kill(signal);
+}
+
 // Single-flight guard for binary downloads. Every session owns its own
 // EcaServer instance, but they all share the managed binary under
 // ~/.eca-desktop — two sessions starting at once must never download and
@@ -599,6 +628,43 @@ export class EcaServer {
         return promise;
     }
 
+    /**
+     * Swap the staged binary into place. POSIX rename-over is atomic and
+     * effectively always succeeds. Windows refuses to rename over — or
+     * unlink — the image of a running process, but it does allow renaming
+     * it aside, so fall back to parking the old exe as `<name>.old-<ts>`
+     * and retrying; parked leftovers are removed on later installs once
+     * their process has exited.
+     */
+    installBinary(stagedBinary: string, managedBinary: string): void {
+        this.cleanupParkedBinaries(managedBinary);
+        try {
+            fs.renameSync(stagedBinary, managedBinary);
+        } catch {
+            try {
+                fs.renameSync(managedBinary, `${managedBinary}.old-${Date.now()}`);
+            } catch {
+                // Rename-aside failed (e.g. no previous binary); last-resort
+                // unlink, then let the retry surface any real error.
+                try { fs.unlinkSync(managedBinary); } catch { /* noop */ }
+            }
+            fs.renameSync(stagedBinary, managedBinary);
+        }
+    }
+
+    /** Remove `.old-*` binaries parked by installBinary (best-effort: still-running exes stay). */
+    private cleanupParkedBinaries(managedBinary: string): void {
+        const dir = path.dirname(managedBinary);
+        const prefix = `${path.basename(managedBinary)}.old-`;
+        try {
+            for (const entry of fs.readdirSync(dir)) {
+                if (entry.startsWith(prefix)) {
+                    try { fs.unlinkSync(path.join(dir, entry)); } catch { /* still running */ }
+                }
+            }
+        } catch { /* best-effort */ }
+    }
+
     /** Remove stage dirs left behind by a previous crashed/killed run. */
     private cleanupStaleStageDirs(): void {
         const dataDir = getDataDir();
@@ -674,15 +740,7 @@ export class EcaServer {
                 fs.chmodSync(stagedBinary, 0o775);
             }
 
-            const managedBinary = this.getManagedBinaryPath();
-            try {
-                fs.renameSync(stagedBinary, managedBinary);
-            } catch {
-                // Windows can refuse to rename over a locked/running exe.
-                // Drop the old file first and retry once.
-                try { fs.unlinkSync(managedBinary); } catch { /* noop */ }
-                fs.renameSync(stagedBinary, managedBinary);
-            }
+            this.installBinary(stagedBinary, this.getManagedBinaryPath());
 
             this.writeVersionFile(version);
             this.onLog(`ECA server ${version} installed successfully`);
@@ -786,7 +844,7 @@ export class EcaServer {
         if (this._proc && !this._proc.killed
             && this._proc.exitCode === null && this._proc.signalCode === null) {
             this.onLog('Cleaning up orphaned ECA server process before restart.');
-            try { this._proc.kill('SIGKILL'); } catch { /* noop */ }
+            try { killServerProcess(this._proc, 'SIGKILL'); } catch { /* noop */ }
         }
         this._proc = null;
         if (this._connection) {
@@ -856,6 +914,9 @@ export class EcaServer {
             const child = spawn(executable, args, {
                 stdio: ['pipe', 'pipe', 'pipe'],
                 env: { ...process.env, ...shellEnv },
+                // Don't allocate a visible console window for the
+                // console-subsystem eca.exe on Windows.
+                windowsHide: true,
             });
             proc = child;
             this._proc = child;
@@ -1040,7 +1101,7 @@ export class EcaServer {
             }
             if (proc) {
                 if (proc.exitCode === null && proc.signalCode === null) {
-                    try { proc.kill('SIGTERM'); } catch { /* noop */ }
+                    try { killServerProcess(proc, 'SIGTERM'); } catch { /* noop */ }
                     // SIGKILL follow-up after a short beat so a wedged
                     // server doesn't linger. (Checked via exitCode /
                     // signalCode, not `killed` — `killed` flips true the
@@ -1050,7 +1111,7 @@ export class EcaServer {
                     setTimeout(() => {
                         try {
                             if (p.exitCode === null && p.signalCode === null) {
-                                p.kill('SIGKILL');
+                                killServerProcess(p, 'SIGKILL');
                             }
                         } catch { /* noop */ }
                     }, SERVER_STOP_GRACE_MS);
@@ -1204,11 +1265,11 @@ export class EcaServer {
                 const killTimer = setTimeout(() => {
                     if (settled) return;
                     this.onLog('ECA server did not exit within grace period; sending SIGKILL.');
-                    try { proc.kill('SIGKILL'); } catch { /* noop */ }
+                    try { killServerProcess(proc, 'SIGKILL'); } catch { /* noop */ }
                     // Give the kernel a beat to reap; resolve either way.
                     setTimeout(onExit, 250);
                 }, SERVER_STOP_GRACE_MS);
-                try { proc.kill('SIGTERM'); }
+                try { killServerProcess(proc, 'SIGTERM'); }
                 catch { onExit(); }
             });
         }

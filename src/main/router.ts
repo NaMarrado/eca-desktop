@@ -3,10 +3,12 @@
 // ============================================================
 
 import type { BrowserWindow } from 'electron';
+import { fileURLToPath } from 'url';
 import type * as rpc from 'vscode-jsonrpc/node';
 import * as rpcTypes from './rpc';
 import type { ChatState } from './chat-state';
 import * as editorActions from './editor-actions';
+import { showInputDialog } from './input-dialog';
 import type { IpcMessage, WorkspaceFolder, McpAddServerParams } from './protocol';
 
 type SendFn = (type: string, data: unknown) => void;
@@ -317,7 +319,9 @@ const routes: Record<string, RouteHandler> = {
         // as file:// URIs; convert each to a filesystem path.
         const roots = ctx.workspaceFolders
             .map((f) => {
-                try { return new URL(f.uri).pathname; }
+                // fileURLToPath (not URL.pathname) so Windows URIs like
+                // file:///C:/Users/x yield C:\Users\x instead of /C:/Users/x.
+                try { return fileURLToPath(f.uri); }
                 catch { return null; }
             })
             .filter((p): p is string => p !== null);
@@ -326,6 +330,26 @@ const routes: Record<string, RouteHandler> = {
 
     'editor/openUrl': (_ctx, data) => {
         editorActions.openUrl({ url: data.url as string });
+    },
+
+    'editor/readInput': async (ctx, data) => {
+        // Serves both webview flows: ProvidersTab login (title/options/
+        // password, no requestId — expects `editor/readInputResponse`)
+        // and ChatPrompt command args ({message, requestId} via
+        // webviewSendAndGet — expects `editor/readInput` echoing the
+        // requestId). Mirrors eca-vscode's showInputBox handler.
+        const value = await showInputDialog(ctx.mainWindow, {
+            title: (data.title as string | undefined)
+                ?? (data.message as string | undefined),
+            placeholder: data.placeholder as string | undefined,
+            options: data.options as string[] | undefined,
+            password: data.password as boolean | undefined,
+        });
+        if (data.requestId !== undefined) {
+            ctx.sendToRenderer('editor/readInput', { requestId: data.requestId, value });
+        } else {
+            ctx.sendToRenderer('editor/readInputResponse', { value });
+        }
     },
 
     'editor/saveFile': async (ctx, data) => {

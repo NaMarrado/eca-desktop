@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as path from 'path';
+import { pathToFileURL } from 'url';
 import type { IpcMessage } from '../protocol';
 
 // ── Mocks ──
@@ -17,6 +19,11 @@ const editorActionsMock = vi.hoisted(() => ({
     writeGlobalConfig: vi.fn(() => ({ ok: true, path: '/p' })),
 }));
 vi.mock('../editor-actions', () => editorActionsMock);
+
+const inputDialogMock = vi.hoisted(() => ({
+    showInputDialog: vi.fn(async () => null as string | null),
+}));
+vi.mock('../input-dialog', () => inputDialogMock);
 
 vi.mock('electron', () => ({
     BrowserWindow: vi.fn(),
@@ -218,38 +225,106 @@ describe('router.dispatch', () => {
     });
 
     describe('editor/openFile', () => {
+        // fileURLToPath is host-platform-dependent (POSIX-style file:///home/x
+        // URIs throw on Windows, which needs a drive letter), so build the
+        // fixtures from host-absolute paths instead of hardcoded URIs.
+        const rootA = path.resolve('/home/user/a');
+        const rootB = path.resolve('/home/user/b');
+
         it('passes workspace-root paths (not URIs) to editorActions.openFile', async () => {
             const { ctx } = makeCtx({
                 workspaceFolders: [
-                    { name: 'a', uri: 'file:///home/user/a' },
-                    { name: 'b', uri: 'file:///home/user/b' },
+                    { name: 'a', uri: pathToFileURL(rootA).href },
+                    { name: 'b', uri: pathToFileURL(rootB).href },
                 ],
             });
 
             await dispatch(ctx, {
                 type: 'editor/openFile' as never,
-                data: { path: '/home/user/a/main.ts' },
+                data: { path: path.join(rootA, 'main.ts') },
             });
 
             expect(editorActionsMock.openFile).toHaveBeenCalledOnce();
             const [payload, roots] = editorActionsMock.openFile.mock.calls[0];
-            expect(payload).toEqual({ path: '/home/user/a/main.ts' });
-            expect(roots).toEqual(['/home/user/a', '/home/user/b']);
+            expect(payload).toEqual({ path: path.join(rootA, 'main.ts') });
+            expect(roots).toEqual([rootA, rootB]);
         });
 
         it('skips malformed URIs silently', async () => {
             const { ctx } = makeCtx({
                 workspaceFolders: [
                     { name: 'a', uri: 'not-a-uri' },
-                    { name: 'b', uri: 'file:///home/user/b' },
+                    { name: 'b', uri: pathToFileURL(rootB).href },
                 ],
             });
             await dispatch(ctx, {
                 type: 'editor/openFile' as never,
-                data: { path: '/home/user/b/x.ts' },
+                data: { path: path.join(rootB, 'x.ts') },
             });
             const [, roots] = editorActionsMock.openFile.mock.calls[0];
-            expect(roots).toEqual(['/home/user/b']);
+            expect(roots).toEqual([rootB]);
+        });
+    });
+
+    describe('editor/readInput', () => {
+        it('shows the dialog and replies with editor/readInputResponse when no requestId (ProvidersTab flow)', async () => {
+            const { ctx, sendToRenderer } = makeCtx();
+            inputDialogMock.showInputDialog.mockResolvedValue('OAuth');
+
+            const handled = await dispatch(ctx, {
+                type: 'editor/readInput' as never,
+                data: {
+                    title: 'Choose login method',
+                    placeholder: 'Select a method...',
+                    options: ['OAuth', 'API Key'],
+                },
+            });
+
+            expect(handled).toBe(true);
+            expect(inputDialogMock.showInputDialog).toHaveBeenCalledOnce();
+            const [parent, opts] = inputDialogMock.showInputDialog.mock.calls[0] as unknown[];
+            expect(parent).toBe(ctx.mainWindow);
+            expect(opts).toEqual({
+                title: 'Choose login method',
+                placeholder: 'Select a method...',
+                options: ['OAuth', 'API Key'],
+                password: undefined,
+            });
+            expect(sendToRenderer).toHaveBeenCalledWith('editor/readInputResponse', {
+                value: 'OAuth',
+            });
+        });
+
+        it('replies with editor/readInput echoing requestId when present (ChatPrompt flow)', async () => {
+            const { ctx, sendToRenderer } = makeCtx();
+            inputDialogMock.showInputDialog.mockResolvedValue('arg-value');
+
+            await dispatch(ctx, {
+                type: 'editor/readInput' as never,
+                data: { message: 'Provide the arg', requestId: 'r-42' },
+            });
+
+            const [, opts] = inputDialogMock.showInputDialog.mock.calls[0] as unknown[];
+            // `message` is used as the title fallback
+            expect((opts as { title?: string }).title).toBe('Provide the arg');
+            expect(sendToRenderer).toHaveBeenCalledWith('editor/readInput', {
+                requestId: 'r-42',
+                value: 'arg-value',
+            });
+        });
+
+        it('propagates null (cancelled dialog)', async () => {
+            const { ctx, sendToRenderer } = makeCtx();
+            inputDialogMock.showInputDialog.mockResolvedValue(null);
+
+            await dispatch(ctx, {
+                type: 'editor/readInput' as never,
+                data: { title: 'API key', password: true },
+            });
+
+            expect(sendToRenderer).toHaveBeenCalledWith('editor/readInputResponse', {
+                value: null,
+            });
         });
     });
 
